@@ -1,73 +1,83 @@
 # Wassapp Appointment
 
-Vanilla TypeScript + Vite appointment booking widget for barbers and salons.
+Multi-tenant appointment platform for salons with:
+- **Administrator dashboard** (manage salons/clients and users)
+- **Salon dashboard** (services, categories, employees, profile settings)
+- **Employee login** (own agenda/appointments)
+- **Vanilla JS embeddable booking widget** (no iframe)
 
 ## Stack
 
-- Vite + Vanilla TypeScript
-- Tailwind CSS
+- Vite + TypeScript
+- Vue 3 (dashboard)
+- Vue Router + Composition API
+- Vanilla JS (widget)
+- Tailwind CSS (dashboard styling)
 - Supabase Auth + Postgres
-- Google Calendar API via service account
-- WhatsApp Cloud API
+- WhatsApp Cloud API (optional)
+- Google Calendar integration (optional, controlled by `ENABLE_GOOGLE_CALENDAR`)
 - Vercel serverless functions
 
 ## Setup
 
 1. Create a Supabase project and run `supabase/schema.sql`.
-2. Enable Supabase Auth for email/password and phone OTP.
-3. Copy `.env.example` to `.env` and fill in:
+2. Seed at least one row in `app_users` with role `administrator` for your own auth user.
+3. Copy `.env.example` to `.env` and configure:
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_ANON_KEY`
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY`
    - `PUBLIC_BASE_URL`
-   - `STRIPE_SECRET_KEY`
-   - `STRIPE_WEBHOOK_SECRET`
-   - `STRIPE_BILLING_PRICE_ID`
-   - `STRIPE_UNIT_AMOUNT_CENTS`
-4. Create a Google Cloud service account, enable the Calendar API, and share the barber calendar with the service account email.
-5. Create a Meta WhatsApp Cloud API app, connect the barber number, and save the phone number ID and access token in the dashboard settings.
-6. In Stripe, create a monthly subscription price with usage-based billing at 25 cents per unit, then register the price ID and webhook endpoint.
-7. Install dependencies and run the app.
+   - `ENABLE_GOOGLE_CALENDAR` (`true`/`false`)
+4. Install and build:
 
 ```bash
 npm install
 npm run build
 ```
 
-For local full-stack work, run the app with Vercel CLI so the `/api` routes are available.
+For full-stack local development (frontend + `/api/*`):
 
 ```bash
 vercel dev
 ```
 
-For the frontend only, you can still use:
+## Roles
 
-```bash
-npm run dev
+- **administrator**: software owner, can manage salons/clients and users
+- **salon**: manages own profile, categories, services, and employees
+- **employee**: logs in with personal credentials and sees own agenda
+
+## Frontend routes
+
+- `/` welcome/intro page with link to dashboard
+- `/dashboard` authenticated app dashboard
+- `/dashboard/widget-preview` authenticated widget preview page
+- `/cancel?token=...` cancellation page
+
+## Widget embedding (no iframe)
+
+Yes, the salon website should load a JS file.
+
+Build output includes:
+- `dist/wassapp-appointment-widget.js`
+
+Example usage:
+
+```html
+<script type="module" src="https://your-domain.example/wassapp-appointment-widget.js"></script>
+<div id="booking-widget"></div>
+<script>
+  window.WassappAppointmentWidget.mount(document.getElementById('booking-widget'), {
+    salonSlug: 'my-salon-slug'
+  });
+</script>
 ```
 
-## Project routes
+You can also use:
 
-- `/` widget
-- `/dashboard` barber admin UI
-- `/cancel?token=...` cancellation confirmation page
-- `/api/*` Vercel serverless endpoints
+```js
+window.WassappAppointment.mount(target, { salonSlug: 'my-salon-slug' });
+```
 
-## Widget embedding
-
-The app exposes `window.WassappAppointment.mount(target, options)` for embedding the widget in another page.
-
-## Deployment
-
-1. Deploy to Vercel.
-2. Set the environment variables in the Vercel project.
-3. Make sure the build command is `npm run build`.
-4. Point your barber site to the deployed widget or mount it via the exported global.
-
-## Notes
-
-- The dashboard supports Supabase email/password and phone OTP.
-- Calendar and WhatsApp connections are stored per barber profile in Supabase.
-- Google Calendar events are created with the barber's selected calendar ID.
-- Stripe usage is recorded on each confirmed appointment and invoiced monthly through Stripe Billing.
+The widget is intentionally styled with a local `<style>` block and semantic class names (`wa-*`) so client-specific CSS overrides are easy.

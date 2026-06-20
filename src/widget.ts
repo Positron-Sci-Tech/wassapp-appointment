@@ -1,137 +1,256 @@
-import { fetchJson, appUrl } from './shared/api';
-import { formatCurrency, formatDateTime, startOfTodayInput, localDateTimeToIso } from './shared/format';
-import type { Barber, BookingResponse, Service, Slot } from './shared/types';
+import { fetchJson } from './shared/api';
+import { formatCurrency, startOfTodayInput } from './shared/format';
+import type { Barber, BookingResponse, Service, ServiceCategory, Slot } from './shared/types';
 
 type WidgetMountOptions = {
+  salonSlug?: string;
   barberId?: string;
 };
 
+type WidgetBootstrapResponse = {
+  salon: {
+    id: string;
+    slug: string | null;
+    display_name: string;
+    allow_multi_service_selection: boolean;
+  };
+  barbers: Barber[];
+  services: Service[];
+  categories: ServiceCategory[];
+  serviceIdsByBarber: Record<string, string[]>;
+};
+
 type BookingFormState = {
+  salonSlug: string;
   barberId: string;
-  serviceId: string;
+  serviceIds: string[];
   date: string;
   slotStartAt: string;
 };
 
 const defaultState = (): BookingFormState => ({
+  salonSlug: '',
   barberId: '',
-  serviceId: '',
+  serviceIds: [],
   date: startOfTodayInput(),
   slotStartAt: '',
 });
+
+function esc(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 export async function mountWidget(root: HTMLElement, options: WidgetMountOptions = {}): Promise<void> {
   root.innerHTML = shell();
 
   const statusEl = root.querySelector<HTMLElement>('[data-widget-status]');
-  const barberSelect = root.querySelector<HTMLSelectElement>('[data-barber-select]');
-  const serviceSelect = root.querySelector<HTMLSelectElement>('[data-service-select]');
+  const barbersContainer = root.querySelector<HTMLElement>('[data-barbers]');
+  const servicesContainer = root.querySelector<HTMLElement>('[data-services]');
   const dateInput = root.querySelector<HTMLInputElement>('[data-date-input]');
   const slotsContainer = root.querySelector<HTMLElement>('[data-slots]');
   const form = root.querySelector<HTMLFormElement>('[data-booking-form]');
   const submitButton = root.querySelector<HTMLButtonElement>('[data-submit]');
   const confirmation = root.querySelector<HTMLElement>('[data-confirmation]');
+  const serviceHint = root.querySelector<HTMLElement>('[data-service-hint]');
+  const salonTitle = root.querySelector<HTMLElement>('[data-salon-title]');
 
   const state = defaultState();
   let barbers: Barber[] = [];
+  let services: Service[] = [];
+  let categories: ServiceCategory[] = [];
+  let serviceIdsByBarber: Record<string, string[]> = {};
+  let allowMultiService = false;
 
   const setStatus = (message: string, tone: 'info' | 'error' = 'info') => {
     if (!statusEl) return;
-    statusEl.className = tone === 'error' ? 'rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700' : 'rounded-xl bg-slate-100 px-4 py-3 text-sm text-slate-700';
+    statusEl.className = tone === 'error' ? 'wa-status wa-status-error' : 'wa-status wa-status-info';
     statusEl.textContent = message;
   };
 
-  const loadBarbers = async () => {
-    setStatus('Loading barbers...');
-    barbers = await fetchJson<Barber[]>('/api/barbers');
+  const updateServicesView = async () => {
+    if (!servicesContainer) return;
+    const assignedIds = new Set(serviceIdsByBarber[state.barberId] ?? []);
+    const availableServices = services.filter((service) => assignedIds.has(service.id) && service.active);
 
+    if (!availableServices.length) {
+      servicesContainer.innerHTML = '<p class="wa-empty">No services available for this barber.</p>';
+      state.serviceIds = [];
+      await loadSlots();
+      return;
+    }
+
+    const categoryMap = new Map(categories.map((category) => [category.id, category]));
+    const byCategory = new Map<string, Service[]>();
+    for (const service of availableServices) {
+      const key = service.category_id ?? '_uncategorized';
+      const list = byCategory.get(key) ?? [];
+      list.push(service);
+      byCategory.set(key, list);
+    }
+
+    const orderedKeys = Array.from(byCategory.keys()).sort((a, b) => {
+      if (a === '_uncategorized') return 1;
+      if (b === '_uncategorized') return -1;
+      const first = categoryMap.get(a);
+      const second = categoryMap.get(b);
+      return (first?.sort_order ?? 0) - (second?.sort_order ?? 0);
+    });
+
+    const rows = orderedKeys
+      .map((key) => {
+        const label = key === '_uncategorized' ? 'Other services' : categoryMap.get(key)?.name ?? 'Services';
+        const cards = (byCategory.get(key) ?? [])
+          .map((service) => {
+            const selected = state.serviceIds.includes(service.id);
+            const thumb = service.thumbnail_url ? `<img class="wa-card-thumb" src="${esc(service.thumbnail_url)}" alt="${esc(service.name)}" />` : '<div class="wa-card-thumb wa-card-thumb-placeholder"></div>';
+            return `
+              <button type="button" data-service-card="${service.id}" class="wa-card ${selected ? 'is-selected' : ''}">
+                ${thumb}
+                <span class="wa-card-title">${esc(service.name)}</span>
+                <span class="wa-card-meta">${service.duration_minutes} min · ${formatCurrency(service.price_cents)}</span>
+              </button>
+            `;
+          })
+          .join('');
+        return `<section class="wa-group"><h3 class="wa-group-title">${esc(label)}</h3><div class="wa-grid">${cards}</div></section>`;
+      })
+      .join('');
+
+    servicesContainer.innerHTML = rows;
+    await loadSlots();
+  };
+
+  const loadSlots = async () => {
+    if (!slotsContainer) return;
+    if (!state.barberId || !state.serviceIds.length || !state.date) {
+      slotsContainer.innerHTML = '<p class="wa-empty">Choose barber, service, and date to see time slots.</p>';
+      return;
+    }
+
+    slotsContainer.innerHTML = '<p class="wa-empty">Loading time slots...</p>';
+    const slots = await fetchJson<Slot[]>(
+      `/api/slots?barberId=${encodeURIComponent(state.barberId)}&serviceIds=${encodeURIComponent(state.serviceIds.join(','))}&date=${encodeURIComponent(state.date)}`,
+    );
+
+    if (!slots.length) {
+      slotsContainer.innerHTML = '<p class="wa-empty">No open slots for this day.</p>';
+      return;
+    }
+
+    slotsContainer.innerHTML = slots
+      .map(
+        (slot, index) => `
+          <label class="wa-slot">
+            <span>${esc(slot.label)}</span>
+            <input type="radio" name="slot" value="${slot.startAt}" ${index === 0 ? 'checked' : ''} />
+          </label>
+        `,
+      )
+      .join('');
+    state.slotStartAt = slots[0].startAt;
+  };
+
+  const loadBootstrap = async () => {
+    const salonSlugFromQuery = new URLSearchParams(window.location.search).get('salonSlug') ?? undefined;
+    const salonSlug = options.salonSlug ?? salonSlugFromQuery;
+    if (!salonSlug) {
+      setStatus('Missing salon slug. Use mount(target, { salonSlug }).', 'error');
+      return;
+    }
+
+    setStatus('Loading salon...');
+    const data = await fetchJson<WidgetBootstrapResponse>(`/api/widget?salonSlug=${encodeURIComponent(salonSlug)}`);
+    state.salonSlug = salonSlug;
+    barbers = data.barbers;
+    services = data.services;
+    categories = data.categories;
+    serviceIdsByBarber = data.serviceIdsByBarber;
+    allowMultiService = data.salon.allow_multi_service_selection;
+
+    if (salonTitle) {
+      salonTitle.textContent = data.salon.display_name;
+    }
+    if (serviceHint) {
+      serviceHint.textContent = allowMultiService ? 'You can select multiple services.' : 'Choose one service.';
+    }
     if (!barbers.length) {
       setStatus('No barbers are available yet.', 'error');
       return;
     }
 
-    if (barberSelect) {
-      barberSelect.innerHTML = barbers
-        .map((barber) => `<option value="${barber.id}">${barber.display_name}</option>`)
+    state.barberId = options.barberId && barbers.some((barber) => barber.id === options.barberId) ? options.barberId : barbers[0].id;
+    if (dateInput) {
+      dateInput.value = state.date;
+      dateInput.min = startOfTodayInput();
+    }
+
+    if (barbersContainer) {
+      barbersContainer.innerHTML = barbers
+        .map((barber) => {
+          const selected = barber.id === state.barberId;
+          const thumb = barber.thumbnail_url ? `<img class="wa-card-thumb" src="${esc(barber.thumbnail_url)}" alt="${esc(barber.display_name)}" />` : '<div class="wa-card-thumb wa-card-thumb-placeholder"></div>';
+          return `
+            <button type="button" data-barber-card="${barber.id}" class="wa-card ${selected ? 'is-selected' : ''}">
+              ${thumb}
+              <span class="wa-card-title">${esc(barber.display_name)}</span>
+            </button>
+          `;
+        })
         .join('');
-      state.barberId = options.barberId && barbers.some((barber) => barber.id === options.barberId) ? options.barberId : barbers[0].id;
-      barberSelect.value = state.barberId;
-      barberSelect.closest('.js-barber-wrap')?.classList.toggle('hidden', barbers.length === 1);
     }
 
-    dateInput?.setAttribute('min', startOfTodayInput());
-    await loadServices();
+    const initialAssigned = serviceIdsByBarber[state.barberId] ?? [];
+    state.serviceIds = initialAssigned.length ? [initialAssigned[0]] : [];
+    await updateServicesView();
+    setStatus('Ready');
   };
 
-  const loadServices = async () => {
-    if (!state.barberId) {
+  root.addEventListener('click', async (event) => {
+    const target = event.target as HTMLElement;
+    const barberButton = target.closest<HTMLElement>('[data-barber-card]');
+    if (barberButton) {
+      state.barberId = barberButton.dataset.barberCard ?? '';
+      const assigned = serviceIdsByBarber[state.barberId] ?? [];
+      state.serviceIds = assigned.length ? [assigned[0]] : [];
+      root.querySelectorAll<HTMLElement>('[data-barber-card]').forEach((element) => {
+        element.classList.toggle('is-selected', element.dataset.barberCard === state.barberId);
+      });
+      await updateServicesView();
       return;
     }
 
-    setStatus('Loading services and slots...');
-    const services = await fetchJson<Service[]>(`/api/services?barberId=${encodeURIComponent(state.barberId)}`);
-    serviceSelect!.innerHTML = services
-      .filter((service) => service.active)
-      .map((service) => `<option value="${service.id}">${service.name} · ${service.duration_minutes} min · ${formatCurrency(service.price_cents)}</option>`)
-      .join('');
-
-    state.serviceId = services.find((service) => service.active)?.id ?? '';
-    if (state.serviceId) {
-      serviceSelect!.value = state.serviceId;
+    const serviceButton = target.closest<HTMLElement>('[data-service-card]');
+    if (serviceButton) {
+      const id = serviceButton.dataset.serviceCard ?? '';
+      if (!id) return;
+      if (allowMultiService) {
+        if (state.serviceIds.includes(id)) {
+          state.serviceIds = state.serviceIds.filter((serviceId) => serviceId !== id);
+        } else {
+          state.serviceIds = [...state.serviceIds, id];
+        }
+      } else {
+        state.serviceIds = [id];
+      }
+      root.querySelectorAll<HTMLElement>('[data-service-card]').forEach((element) => {
+        element.classList.toggle('is-selected', state.serviceIds.includes(element.dataset.serviceCard ?? ''));
+      });
+      await loadSlots();
     }
-    await loadSlots();
-  };
-
-  const loadSlots = async () => {
-    if (!state.barberId || !state.serviceId || !state.date) {
-      slotsContainer!.innerHTML = '<p class="text-sm text-slate-500">Choose a service and date to see time slots.</p>';
-      return;
-    }
-
-    slotsContainer!.innerHTML = '<p class="text-sm text-slate-500">Loading time slots...</p>';
-    const slots = await fetchJson<Slot[]>(
-      `/api/slots?barberId=${encodeURIComponent(state.barberId)}&serviceId=${encodeURIComponent(state.serviceId)}&date=${encodeURIComponent(state.date)}`,
-    );
-
-    if (!slots.length) {
-      slotsContainer!.innerHTML = '<p class="text-sm text-slate-500">No open slots for this day.</p>';
-      return;
-    }
-
-    slotsContainer!.innerHTML = slots
-      .map(
-        (slot, index) => `
-          <label class="flex cursor-pointer items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 transition hover:border-brand-300 hover:bg-brand-50">
-            <span class="text-sm font-medium text-slate-900">${slot.label}</span>
-            <input class="h-4 w-4 border-slate-300 text-brand-600 focus:ring-brand-500" type="radio" name="slot" value="${slot.startAt}" ${index === 0 ? 'checked' : ''} />
-          </label>
-        `,
-      )
-      .join('');
-
-    state.slotStartAt = slots[0].startAt;
-  };
+  });
 
   root.addEventListener('change', async (event) => {
-    const target = event.target as HTMLInputElement | HTMLSelectElement;
-    if (target.matches('[data-barber-select]')) {
-      state.barberId = target.value;
-      await loadServices();
-      return;
-    }
-
-    if (target.matches('[data-service-select]')) {
-      state.serviceId = target.value;
-      await loadSlots();
-      return;
-    }
-
+    const target = event.target as HTMLInputElement;
     if (target.matches('[data-date-input]')) {
-      state.date = (target as HTMLInputElement).value;
+      state.date = target.value;
       await loadSlots();
       return;
     }
-
     if (target.name === 'slot') {
       state.slotStartAt = target.value;
     }
@@ -142,14 +261,15 @@ export async function mountWidget(root: HTMLElement, options: WidgetMountOptions
     const formData = new FormData(form);
     const slotStartAt = state.slotStartAt || String(formData.get('slot') ?? '');
 
-    if (!state.barberId || !state.serviceId || !slotStartAt) {
+    if (!state.barberId || !state.serviceIds.length || !slotStartAt) {
       setStatus('Please choose a barber, service, and time slot.', 'error');
       return;
     }
 
     const payload = {
+      salonSlug: state.salonSlug,
       barberId: state.barberId,
-      serviceId: state.serviceId,
+      serviceIds: state.serviceIds,
       startAt: slotStartAt,
       customer: {
         name: String(formData.get('customerName') ?? '').trim(),
@@ -165,8 +285,9 @@ export async function mountWidget(root: HTMLElement, options: WidgetMountOptions
       return;
     }
 
-    submitButton!.disabled = true;
-    submitButton!.textContent = 'Booking...';
+    if (!submitButton) return;
+    submitButton.disabled = true;
+    submitButton.textContent = 'Booking...';
     setStatus('Submitting booking...');
 
     try {
@@ -175,101 +296,114 @@ export async function mountWidget(root: HTMLElement, options: WidgetMountOptions
         body: JSON.stringify(payload),
       });
 
-      confirmation!.classList.remove('hidden');
-      confirmation!.innerHTML = `
-        <div class="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-950">
-          <p class="text-lg font-semibold">Booking confirmed</p>
-          <p class="mt-2 text-sm">Reference: ${response.bookingReference}</p>
-          <p class="mt-1 text-sm">You will receive a WhatsApp confirmation shortly.</p>
-          <p class="mt-3 text-sm">
-            Cancel link:
-            <a class="font-medium text-emerald-700 underline" href="${response.cancellationUrl}">${response.cancellationUrl}</a>
-          </p>
-        </div>
-      `;
+      if (confirmation) {
+        confirmation.classList.remove('wa-hidden');
+        confirmation.innerHTML = `
+          <div class="wa-confirmation">
+            <p class="wa-confirmation-title">Booking confirmed</p>
+            <p>Reference: ${esc(response.bookingReference)}</p>
+            <p>Cancel link: <a href="${esc(response.cancellationUrl)}">${esc(response.cancellationUrl)}</a></p>
+          </div>
+        `;
+      }
       setStatus('Booking saved successfully.');
       form.reset();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Booking failed.', 'error');
     } finally {
-      submitButton!.disabled = false;
-      submitButton!.textContent = 'Confirm';
+      submitButton.disabled = false;
+      submitButton.textContent = 'Confirm';
     }
   });
 
-  await loadBarbers();
+  await loadBootstrap();
 }
 
 function shell(): string {
   return `
-    <main class="mx-auto flex min-h-screen w-full max-w-5xl items-center justify-center px-4 py-10">
-      <section class="grid w-full gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-        <div class="rounded-3xl bg-gradient-to-br from-brand-700 via-brand-600 to-brand-500 p-8 text-white shadow-soft">
-          <p class="text-sm font-semibold uppercase tracking-[0.2em] text-brand-100">Wassapp Appointment</p>
-          <h1 class="mt-4 text-3xl font-bold leading-tight">Book a haircut or salon visit in a few taps.</h1>
-          <p class="mt-4 max-w-xl text-sm leading-6 text-brand-50">
-            GDPR-friendly, mobile-first booking for barbers and salons. Confirmations go to WhatsApp and calendar events are created automatically.
-          </p>
-        </div>
-
-        <div class="rounded-3xl border border-slate-200 bg-white p-6 shadow-soft">
-          <div data-widget-status class="rounded-xl bg-slate-100 px-4 py-3 text-sm text-slate-700">Loading widget...</div>
-          <form data-booking-form class="mt-5 space-y-4">
-            <div class="js-barber-wrap">
-              <label class="mb-1 block text-sm font-medium text-slate-700">Barber</label>
-              <select data-barber-select class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm focus:border-brand-500 focus:ring-brand-500"></select>
-            </div>
-
+    <style>
+      .wa-widget { max-width: 760px; margin: 0 auto; font-family: Inter, Arial, sans-serif; color: #0f172a; }
+      .wa-card-wrap, .wa-panel { background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 16px; }
+      .wa-title { margin: 0 0 4px; font-size: 24px; }
+      .wa-subtitle { margin: 0 0 12px; color: #475569; }
+      .wa-status { margin-bottom: 12px; border-radius: 12px; padding: 10px 12px; font-size: 14px; }
+      .wa-status-info { background: #f1f5f9; color: #334155; }
+      .wa-status-error { background: #fff1f2; color: #9f1239; }
+      .wa-section { margin-top: 16px; }
+      .wa-label { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 600; }
+      .wa-help { margin: -4px 0 8px; font-size: 13px; color: #64748b; }
+      .wa-grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+      .wa-group { margin-top: 10px; }
+      .wa-group-title { margin: 0 0 8px; font-size: 14px; color: #475569; }
+      .wa-card { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; width: 100%; border: 1px solid #cbd5e1; border-radius: 12px; background: #fff; padding: 10px; cursor: pointer; text-align: left; }
+      .wa-card:hover { border-color: #6366f1; }
+      .wa-card.is-selected { border-color: #4f46e5; background: #eef2ff; }
+      .wa-card-thumb { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; background: #e2e8f0; }
+      .wa-card-thumb-placeholder { border: 1px dashed #94a3b8; }
+      .wa-card-title { font-weight: 600; }
+      .wa-card-meta { font-size: 12px; color: #475569; }
+      .wa-date, .wa-input, .wa-textarea { width: 100%; border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; font-size: 14px; box-sizing: border-box; }
+      .wa-slot { display: flex; align-items: center; justify-content: space-between; border: 1px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+      .wa-row { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+      .wa-consent { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: #334155; margin-top: 10px; }
+      .wa-submit { width: 100%; margin-top: 12px; border: 0; border-radius: 10px; padding: 12px; background: #4f46e5; color: #fff; font-weight: 600; cursor: pointer; }
+      .wa-submit[disabled] { opacity: 0.6; cursor: not-allowed; }
+      .wa-empty { margin: 0; color: #64748b; font-size: 14px; }
+      .wa-confirmation { border: 1px solid #86efac; background: #f0fdf4; border-radius: 12px; margin-top: 12px; padding: 12px; font-size: 14px; }
+      .wa-confirmation-title { font-weight: 700; margin: 0 0 8px; }
+      .wa-hidden { display: none; }
+      @media (max-width: 640px) { .wa-row { grid-template-columns: 1fr; } }
+    </style>
+    <main class="wa-widget">
+      <section class="wa-card-wrap">
+        <h1 class="wa-title" data-salon-title>Book an appointment</h1>
+        <p class="wa-subtitle">Choose your barber, services, and preferred time.</p>
+      </section>
+      <section class="wa-panel">
+        <div data-widget-status class="wa-status wa-status-info">Loading widget...</div>
+        <form data-booking-form>
+          <div class="wa-section">
+            <p class="wa-label">Barber</p>
+            <div data-barbers class="wa-grid"></div>
+          </div>
+          <div class="wa-section">
+            <p class="wa-label">Services</p>
+            <p class="wa-help" data-service-hint></p>
+            <div data-services></div>
+          </div>
+          <div class="wa-section">
+            <label class="wa-label">Date</label>
+            <input data-date-input type="date" class="wa-date" />
+          </div>
+          <div class="wa-section">
+            <p class="wa-label">Available times</p>
+            <div data-slots></div>
+          </div>
+          <div class="wa-section wa-row">
             <div>
-              <label class="mb-1 block text-sm font-medium text-slate-700">Service</label>
-              <select data-service-select class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm focus:border-brand-500 focus:ring-brand-500"></select>
+              <label class="wa-label">Name</label>
+              <input name="customerName" required class="wa-input" />
             </div>
-
             <div>
-              <label class="mb-1 block text-sm font-medium text-slate-700">Date</label>
-              <input data-date-input type="date" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm focus:border-brand-500 focus:ring-brand-500" />
+              <label class="wa-label">WhatsApp number</label>
+              <input name="customerPhone" required placeholder="+31612345678" class="wa-input" />
             </div>
-
-            <div>
-              <p class="mb-2 text-sm font-medium text-slate-700">Available times</p>
-              <div data-slots class="grid gap-2"></div>
-            </div>
-
-            <div class="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label class="mb-1 block text-sm font-medium text-slate-700">Name</label>
-                <input name="customerName" required class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm focus:border-brand-500 focus:ring-brand-500" />
-              </div>
-              <div>
-                <label class="mb-1 block text-sm font-medium text-slate-700">WhatsApp number</label>
-                <input name="customerPhone" required placeholder="+31612345678" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm focus:border-brand-500 focus:ring-brand-500" />
-              </div>
-            </div>
-
-            <div>
-              <label class="mb-1 block text-sm font-medium text-slate-700">Email (optional)</label>
-              <input name="customerEmail" type="email" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm focus:border-brand-500 focus:ring-brand-500" />
-            </div>
-
-            <div>
-              <label class="mb-1 block text-sm font-medium text-slate-700">Notes (optional)</label>
-              <textarea name="notes" rows="3" class="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm focus:border-brand-500 focus:ring-brand-500"></textarea>
-            </div>
-
-            <label class="flex items-start gap-3 rounded-2xl bg-slate-50 p-4 text-sm text-slate-700">
-              <input name="consent" type="checkbox" class="mt-1 h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
-              <span>
-                I agree to be contacted about this booking by WhatsApp and understand my data will be stored only for scheduling, reminders, and cancellation handling.
-              </span>
-            </label>
-
-            <button data-submit type="submit" class="inline-flex w-full items-center justify-center rounded-xl bg-brand-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-60">
-              Confirm
-            </button>
-          </form>
-
-          <div data-confirmation class="mt-5 hidden"></div>
-        </div>
+          </div>
+          <div class="wa-section">
+            <label class="wa-label">Email (optional)</label>
+            <input name="customerEmail" type="email" class="wa-input" />
+          </div>
+          <div class="wa-section">
+            <label class="wa-label">Notes (optional)</label>
+            <textarea name="notes" rows="3" class="wa-textarea"></textarea>
+          </div>
+          <label class="wa-consent">
+            <input name="consent" type="checkbox" />
+            <span>I agree to be contacted about this booking and understand my data is used for scheduling only.</span>
+          </label>
+          <button data-submit type="submit" class="wa-submit">Confirm</button>
+        </form>
+        <div data-confirmation class="wa-hidden"></div>
       </section>
     </main>
   `;
@@ -282,7 +416,10 @@ export function bootstrapWidget(): void {
   }
 
   const params = new URLSearchParams(window.location.search);
-  void mountWidget(root, { barberId: params.get('barberId') ?? undefined });
+  void mountWidget(root, {
+    salonSlug: params.get('salonSlug') ?? undefined,
+    barberId: params.get('barberId') ?? undefined,
+  });
 }
 
 declare global {

@@ -1,6 +1,6 @@
 import { createClient, type SupabaseClient, type User } from '@supabase/supabase-js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Barber } from '../src/shared/types';
+import type { AppUser, AppUserRole, Barber } from '../src/shared/types';
 
 type ApiRequest = IncomingMessage & {
   body?: unknown;
@@ -103,6 +103,47 @@ export async function requireBarber(req: IncomingMessage): Promise<Barber> {
   }
 
   return data as Barber;
+}
+
+export async function requireAppUser(req: IncomingMessage): Promise<{ authUser: User; appUser: AppUser }> {
+  const authUser = await requireUser(req);
+  const client = getAdminClient();
+  const { data, error } = await client.from('app_users').select('*').eq('auth_user_id', authUser.id).maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  if (!data) {
+    throw new Error('App user profile not found');
+  }
+
+  return {
+    authUser,
+    appUser: data as AppUser,
+  };
+}
+
+export async function requireRole(req: IncomingMessage, roles: AppUserRole[]): Promise<{ authUser: User; appUser: AppUser }> {
+  const ctx = await requireAppUser(req);
+  if (!roles.includes(ctx.appUser.role)) {
+    throw new Error('Forbidden');
+  }
+  return ctx;
+}
+
+export function requireSalonId(appUser: AppUser): string {
+  if (!appUser.salon_id) {
+    throw new Error('Salon not assigned');
+  }
+  return appUser.salon_id;
+}
+
+export function asSlug(value: unknown): string {
+  return cleanString(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
 }
 
 export function publicBarberSelect() {

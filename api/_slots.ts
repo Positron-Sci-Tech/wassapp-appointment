@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { AvailabilityException, AvailabilityRule, Service, Slot } from '../src/shared/types';
+import type { AvailabilityException, AvailabilityRule, Slot } from '../src/shared/types';
 
 function timeToMinutes(value: string): number {
   const [hours, minutes] = value.split(':').map(Number);
@@ -21,7 +21,7 @@ function toIso(date: string, time: string): string {
 export async function buildSlotsForDate(
   client: SupabaseClient,
   barberId: string,
-  service: Service,
+  serviceBlockMinutes: number,
   date: string,
 ): Promise<Slot[]> {
   const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
@@ -57,13 +57,13 @@ export async function buildSlotsForDate(
 
   const startMinutes = timeToMinutes(rule.start_time);
   const endMinutes = timeToMinutes(rule.end_time);
-  const blockMinutes = service.duration_minutes + service.buffer_minutes;
+  const blockMinutes = serviceBlockMinutes;
   const existing = appointmentsResult.data as { start_at: string; end_at: string; status: string }[];
 
   const slots: Slot[] = [];
   for (let start = startMinutes; start + blockMinutes <= endMinutes; start += blockMinutes) {
     const candidateStart = minutesToTime(start);
-    const candidateEnd = minutesToTime(start + service.duration_minutes);
+    const candidateEnd = minutesToTime(start + blockMinutes);
     const startAt = toIso(date, candidateStart);
     const endAt = toIso(date, candidateEnd);
     const overlaps = existing.some((appointment) => {

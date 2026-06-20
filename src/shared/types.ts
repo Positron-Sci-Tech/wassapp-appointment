@@ -1,9 +1,12 @@
 export type Barber = {
   id: string;
-  owner_user_id: string;
-  slug: string;
+  owner_user_id: string | null;
+  salon_id: string;
+  slug: string | null;
   display_name: string;
+  thumbnail_url: string | null;
   timezone: string;
+  active: boolean;
   billing_percent: number;
   billing_unit_amount_cents: number;
   calendar_id: string | null;
@@ -20,12 +23,48 @@ export type Barber = {
 
 export type Service = {
   id: string;
-  barber_id: string;
+  salon_id: string;
+  barber_id: string | null;
+  category_id: string | null;
   name: string;
+  thumbnail_url: string | null;
   duration_minutes: number;
   buffer_minutes: number;
   price_cents: number;
   active: boolean;
+};
+
+export type ServiceCategory = {
+  id: string;
+  salon_id: string;
+  name: string;
+  sort_order: number;
+};
+
+export type Salon = {
+  id: string;
+  owner_user_id: string | null;
+  slug: string | null;
+  display_name: string;
+  allow_multi_service_selection: boolean;
+  billing_percent: number;
+  billing_unit_amount_cents: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AppUserRole = 'administrator' | 'salon' | 'employee';
+
+export type AppUser = {
+  id: string;
+  auth_user_id: string;
+  role: AppUserRole;
+  salon_id: string | null;
+  barber_id: string | null;
+  display_name: string | null;
+  email: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type AvailabilityRule = {
@@ -49,8 +88,10 @@ export type AvailabilityException = {
 
 export type Appointment = {
   id: string;
+  salon_id: string;
   barber_id: string;
   service_id: string;
+  service_ids: string[] | null;
   customer_name: string;
   customer_phone: string;
   customer_email: string | null;
@@ -70,8 +111,10 @@ export type Slot = {
 };
 
 export type BookingRequest = {
+  salonSlug?: string;
   barberId: string;
-  serviceId: string;
+  serviceId?: string;
+  serviceIds?: string[];
   startAt: string;
   customer: {
     name: string;
@@ -93,18 +136,12 @@ export type BookingResponse = {
 
 export type DashboardProfileInput = {
   display_name: string;
-  slug: string;
-  timezone: string;
+  slug: string | null;
+  allow_multi_service_selection: boolean;
   billing_percent: number;
-  calendar_id: string | null;
-  google_service_account_email: string | null;
-  google_private_key: string | null;
-  whatsapp_phone_number_id: string | null;
-  whatsapp_access_token: string | null;
-  whatsapp_business_account_id: string | null;
 };
 
-export type DashboardProfile = Barber;
+export type DashboardProfile = Salon;
 
 export type AppointmentStatusSummary = {
   total: number;

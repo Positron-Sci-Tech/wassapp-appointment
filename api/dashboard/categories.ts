@@ -1,17 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
-import type { Service } from '../../src/shared/types';
+import type { ServiceCategory } from '../../src/shared/types';
 import { getAdminClient, json, readJsonBody, requireRole, requireSalonId } from '../_lib';
 
-const serviceSchema = z.object({
+const categorySchema = z.object({
   id: z.string().uuid().optional(),
   name: z.string().min(1),
-  duration_minutes: z.number().int().positive(),
-  price_cents: z.number().int().min(0),
-  buffer_minutes: z.number().int().min(0),
-  active: z.boolean().default(true),
-  thumbnail_url: z.string().url().nullable().optional(),
-  category_id: z.string().uuid().nullable().optional(),
+  sort_order: z.number().int().min(0).default(0),
 });
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -27,23 +22,23 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const client = getAdminClient();
 
   if (req.method === 'GET') {
-    const { data, error } = await client.from('services').select('*').eq('salon_id', salonId).order('created_at', { ascending: true });
+    const { data, error } = await client.from('service_categories').select('*').eq('salon_id', salonId).order('sort_order', { ascending: true });
     if (error) {
       json(res, 500, { error: error.message });
       return;
     }
-    json(res, 200, (data ?? []) as Service[]);
+    json(res, 200, (data ?? []) as ServiceCategory[]);
     return;
   }
 
   if (context.appUser.role !== 'salon') {
-    json(res, 403, { error: 'Only salon users can modify services' });
+    json(res, 403, { error: 'Only salon users can modify categories' });
     return;
   }
 
   if (req.method === 'POST') {
     const body = await readJsonBody<unknown>(req as IncomingMessage & { body?: unknown });
-    const parsed = serviceSchema.safeParse(body);
+    const parsed = categorySchema.safeParse(body);
     if (!parsed.success) {
       json(res, 400, { error: parsed.error.flatten() });
       return;
@@ -52,31 +47,26 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const payload = {
       salon_id: salonId,
       name: parsed.data.name,
-      duration_minutes: parsed.data.duration_minutes,
-      price_cents: parsed.data.price_cents,
-      buffer_minutes: parsed.data.buffer_minutes,
-      active: parsed.data.active,
-      thumbnail_url: parsed.data.thumbnail_url ?? null,
-      category_id: parsed.data.category_id ?? null,
+      sort_order: parsed.data.sort_order,
       updated_at: new Date().toISOString(),
     };
 
     if (parsed.data.id) {
-      const updateResult = await client.from('services').update(payload).eq('id', parsed.data.id).eq('salon_id', salonId).select('*').single();
+      const updateResult = await client.from('service_categories').update(payload).eq('id', parsed.data.id).eq('salon_id', salonId).select('*').single();
       if (updateResult.error) {
         json(res, 500, { error: updateResult.error.message });
         return;
       }
-      json(res, 200, updateResult.data as Service);
+      json(res, 200, updateResult.data as ServiceCategory);
       return;
     }
 
-    const insertResult = await client.from('services').insert(payload).select('*').single();
+    const insertResult = await client.from('service_categories').insert(payload).select('*').single();
     if (insertResult.error) {
       json(res, 500, { error: insertResult.error.message });
       return;
     }
-    json(res, 200, insertResult.data as Service);
+    json(res, 200, insertResult.data as ServiceCategory);
     return;
   }
 
@@ -87,12 +77,12 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       return;
     }
 
-    const [assignmentResult, deleteResult] = await Promise.all([
-      client.from('employee_services').delete().eq('service_id', body.id),
-      client.from('services').delete().eq('id', body.id).eq('salon_id', salonId),
+    const [serviceUpdateResult, deleteResult] = await Promise.all([
+      client.from('services').update({ category_id: null }).eq('category_id', body.id).eq('salon_id', salonId),
+      client.from('service_categories').delete().eq('id', body.id).eq('salon_id', salonId),
     ]);
-    if (assignmentResult.error) {
-      json(res, 500, { error: assignmentResult.error.message });
+    if (serviceUpdateResult.error) {
+      json(res, 500, { error: serviceUpdateResult.error.message });
       return;
     }
     if (deleteResult.error) {

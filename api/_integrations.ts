@@ -3,6 +3,11 @@ import type { Barber, BookingResponse, Appointment } from '../src/shared/types';
 import { getBaseUrl } from './_lib';
 
 export async function createCalendarEvent(barber: Barber, appointment: Appointment & { service_name: string }): Promise<string | null> {
+  const isEnabled = process.env.ENABLE_GOOGLE_CALENDAR === 'true';
+  if (!isEnabled) {
+    return null;
+  }
+
   if (!barber.google_service_account_email || !barber.google_private_key || !barber.calendar_id) {
     return null;
   }
@@ -39,6 +44,11 @@ export async function createCalendarEvent(barber: Barber, appointment: Appointme
 }
 
 export async function cancelCalendarEvent(barber: Barber, googleEventId: string | null): Promise<void> {
+  const isEnabled = process.env.ENABLE_GOOGLE_CALENDAR === 'true';
+  if (!isEnabled) {
+    return;
+  }
+
   if (!googleEventId || !barber.google_service_account_email || !barber.google_private_key || !barber.calendar_id) {
     return;
   }
